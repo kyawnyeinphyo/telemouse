@@ -27,6 +27,11 @@ scroll_alpha = 0.35       # smoothing factor for scroll velocity
 scroll_speed = 1500       # scale normalized dy to scroll units
 scroll_max_step = 120     # clamp each scroll step to avoid spikes
 
+# Active area padding (reduce usable camera area to avoid edge loss)
+active_pad_x = 0.08  # 8% left/right padding
+active_pad_y = 0.08  # 8% top/bottom padding
+draw_active_area = True
+
 # Click debounce
 last_click_time = 0
 click_cooldown = 0.3  # seconds
@@ -50,23 +55,15 @@ def is_finger_extended(landmarks, finger_tip_id, finger_pip_id):
     # For webcam flipped view, extended finger has tip.y < pip.y
     return landmarks[finger_tip_id].y < landmarks[finger_pip_id].y
 
-def map_to_screen(x, y, cam_w, cam_h, screen_w, screen_h):
-    """Map normalized camera coords to screen coords while preserving aspect ratio."""
-    cam_aspect = cam_w / cam_h
-    screen_aspect = screen_w / screen_h
-
-    if cam_aspect > screen_aspect:
-        # Camera is wider: crop left/right
-        new_w = screen_aspect / cam_aspect
-        x = (x - (1.0 - new_w) / 2.0) / new_w
-    elif cam_aspect < screen_aspect:
-        # Camera is taller: crop top/bottom
-        new_h = cam_aspect / screen_aspect
-        y = (y - (1.0 - new_h) / 2.0) / new_h
-
-    x = max(0.0, min(1.0, x))
-    y = max(0.0, min(1.0, y))
-    return x, y
+def normalize_to_active(x, y, roi_x1, roi_y1, roi_w, roi_h, frame_w, frame_h):
+    """Map full-frame normalized coords into active-area normalized coords (clamped)."""
+    px = x * frame_w
+    py = y * frame_h
+    nx = (px - roi_x1) / roi_w
+    ny = (py - roi_y1) / roi_h
+    nx = max(0.0, min(1.0, nx))
+    ny = max(0.0, min(1.0, ny))
+    return nx, ny
 
 print("Program started! Show index + middle fingers to scroll. Press Q to quit.")
 
@@ -77,6 +74,36 @@ while True:
     
     frame = cv2.flip(frame, 1)  # Mirror for natural control
     h, w, _ = frame.shape
+
+    # Compute active area (crop) to avoid edges
+    pad_x = min(max(active_pad_x, 0.0), 0.45)
+    pad_y = min(max(active_pad_y, 0.0), 0.45)
+    roi_x1 = int(w * pad_x)
+    roi_y1 = int(h * pad_y)
+    roi_x2 = int(w * (1.0 - pad_x))
+    roi_y2 = int(h * (1.0 - pad_y))
+    roi_w = max(1, roi_x2 - roi_x1)
+    roi_h = max(1, roi_y2 - roi_y1)
+
+    # Match active area aspect ratio to display ratio
+    screen_aspect = screen_w / screen_h
+    roi_aspect = roi_w / roi_h
+    if roi_aspect > screen_aspect:
+        new_w = max(1, int(roi_h * screen_aspect))
+        cx = (roi_x1 + roi_x2) // 2
+        roi_x1 = max(0, cx - new_w // 2)
+        roi_x2 = min(w, roi_x1 + new_w)
+    elif roi_aspect < screen_aspect:
+        new_h = max(1, int(roi_w / screen_aspect))
+        cy = (roi_y1 + roi_y2) // 2
+        roi_y1 = max(0, cy - new_h // 2)
+        roi_y2 = min(h, roi_y1 + new_h)
+    roi_w = max(1, roi_x2 - roi_x1)
+    roi_h = max(1, roi_y2 - roi_y1)
+
+    if draw_active_area:
+        cv2.rectangle(frame, (roi_x1, roi_y1), (roi_x2, roi_y2), (255, 255, 0), 2)
+
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
     results = detector.detect(mp_image)
@@ -106,7 +133,9 @@ while True:
             
             if scroll_mode:
                 # Use midpoint between index and middle for scroll tracking (normalized)
-                scroll_y = (index_tip.y + middle_tip.y) / 2.0
+                _, idx_ny = normalize_to_active(index_tip.x, index_tip.y, roi_x1, roi_y1, roi_w, roi_h, w, h)
+                _, mid_ny = normalize_to_active(middle_tip.x, middle_tip.y, roi_x1, roi_y1, roi_w, roi_h, w, h)
+                scroll_y = (idx_ny + mid_ny) / 2.0
                 
                 cv2.putText(frame, "SCROLL MODE", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
                 cv2.line(frame, (int(ix), int(iy)), (int(mx), int(my)), (0, 255, 255), 3)
@@ -140,7 +169,7 @@ while True:
             if index_up and not middle_up:
                 cv2.putText(frame, "MOVE MODE", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                mapped_x, mapped_y = map_to_screen(index_tip.x, index_tip.y, w, h, screen_w, screen_h)
+                mapped_x, mapped_y = normalize_to_active(index_tip.x, index_tip.y, roi_x1, roi_y1, roi_w, roi_h, w, h)
                 target_x = screen_w * mapped_x
                 target_y = screen_h * mapped_y
                 target_x = max(0, min(screen_w - 1, target_x))
