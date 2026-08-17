@@ -1,0 +1,7 @@
+.venv/
+venv/
+__pycache__/
+.ruff_cache/
+*.py[cod]
+*.task.part
+.DS_Store
